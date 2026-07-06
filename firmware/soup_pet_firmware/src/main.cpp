@@ -59,10 +59,10 @@ Task taskTest(10000, TASK_FOREVER, &test);
 
 void moveX(int xunf) {
   int x = xunf;
-  if (xunf > 180) {
-    x = 180;
-  } else if (xunf < 0) {
-    x = 0;
+  if (xunf > 120) {
+    x = 120;
+  } else if (xunf < 55) {
+    x = 55;
   }
 
   servoX.write(x);
@@ -74,10 +74,10 @@ void moveX(int xunf) {
 
 void moveY(int yunf) {
   int y = yunf;
-  if (yunf > 180) {
-    y = 180;
-  } else if (yunf < 45) {
-    y = 45;
+  if (yunf > 115) {
+    y = 115;
+  } else if (yunf < 55) {
+    y = 55;
   }
 
   servoY.write(y);
@@ -219,9 +219,9 @@ void loop() {
   // sensor readings
   if (digitalRead(TOUCH_PIN) == HIGH) {
     isTouchingHead = true;
-    moveX(70);
+    moveX(75);
     delay(150);
-    moveX(50);
+    moveX(105);
     delay(150);
   } else {
     isTouchingHead = false;
