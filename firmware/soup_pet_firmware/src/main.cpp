@@ -32,6 +32,10 @@ int movementStep = 5;
 bool isTouchingHead = false;
 bool isTouchingHeadOld = isTouchingHead;
 
+bool selfDestructActive = false;
+bool selfDestructMoveLeft = true;
+int selfDestructMovesRemaining = 0;
+unsigned long selfDestructNextMoveMs = 0;
 
 // idk find a better way to laod the html file
 // https://stackoverflow.com/questions/2602013/read-whole-ascii-file-into-c-stdstring
@@ -83,6 +87,30 @@ void moveY(int yunf) {
   Serial.println(str);
 }
 
+void startSelfDestruct() {
+  selfDestructActive = true;
+  selfDestructMoveLeft = true;
+  selfDestructMovesRemaining = 30;
+  selfDestructNextMoveMs = 0;
+}
+
+void runSelfDestruct() {
+  if (!selfDestructActive || selfDestructMovesRemaining <= 0) {
+    selfDestructActive = false;
+    return;
+  }
+
+  unsigned long now = millis();
+  if (selfDestructNextMoveMs != 0 && (long)(now - selfDestructNextMoveMs) < 0) {
+    return;
+  }
+
+  moveX(selfDestructMoveLeft ? 0 : 180);
+  selfDestructMoveLeft = !selfDestructMoveLeft;
+  selfDestructMovesRemaining--;
+  selfDestructNextMoveMs = now + 50;
+}
+
 void setup() {
 
   ESP32PWM::allocateTimer(0);
@@ -121,7 +149,6 @@ void setup() {
   });
 
   ws.onEvent([](AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
-    (void)len;
 
     if (type == WS_EVT_CONNECT) {
       Serial.println("ws connect");
@@ -136,19 +163,21 @@ void setup() {
       //  info->message_opcode, len
       //);
 
-      data[len] = 0;
-      String message = (char*)data;
+      if (!info->final || info->index != 0 || info->len != len || info->opcode != WS_TEXT) {
+        return;
+      }
+
+      String message;
+      message.reserve(len);
+      for (size_t i = 0; i < len; i++) {
+        message += (char)data[i];
+      }
       
       Serial.print("Received Message: ");
       Serial.println(message);
 
       if (message == "sdestruct") {
-        for (int i = 0; i < 15; i++) {
-          moveX(0);
-          delay(50);
-          moveX(180);
-          delay(50);
-        }
+        startSelfDestruct();
       }
       if (message == "stepL") {
         moveX(xPos + movementStep);
@@ -169,6 +198,9 @@ void setup() {
       if (message == "capture") {
         Serial.println(camera_capture());
       }
+      if (message.startsWith("voice:")) {
+        ws.textAll(message);
+      }
 
       //todo handling messages
     }
@@ -181,6 +213,8 @@ void setup() {
 
 void loop() {
   runner.execute();
+  ws.cleanupClients();
+  runSelfDestruct();
 
   // sensor readings
   if (digitalRead(TOUCH_PIN) == HIGH) {

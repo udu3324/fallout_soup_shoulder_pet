@@ -56,6 +56,28 @@
       color: #ffffff;
       background-color: #8C6665;
     }
+
+    .voice-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+
+    .voice-line {
+      min-height: 34px;
+      max-width: 180px;
+      overflow-wrap: anywhere;
+    }
+
+    .voice-status {
+      margin-top: 8px;
+      font-size: 0.9em;
+    }
+
+    #voice-files {
+      display: none;
+    }
   </style>
 </head>
 
@@ -107,6 +129,22 @@
 
       <button onclick="sendMessage('normal');">Soup Home</button>
 
+    </div>
+
+  </fieldset>
+
+  <br />
+
+  <fieldset>
+    <legend>Voice Lines</legend>
+
+    <div>
+      <button onclick="pickVoiceLines();">Import Voice Lines</button>
+      <button onclick="testLocalVoiceLine();">Test Local Audio</button>
+      <button onclick="clearVoiceLines();">Clear Voice Lines</button>
+      <input id="voice-files" type="file" accept="audio/*" multiple />
+      <div id="voice-status" class="voice-status">Loading voice lines...</div>
+      <div id="voice-buttons" class="voice-grid"></div>
     </div>
 
   </fieldset>
@@ -186,19 +224,39 @@
 </body>
 
 <script>
-  var ws = new WebSocket('ws://192.168.4.1/ws');
+  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const wsHost = window.location.host || '192.168.4.1'
+  let ws = null
+  let reconnectTimer = null
 
-  ws.onopen = function () {
-    console.log("WebSocket connected");
-  };
-  ws.onclose = function () {
-    console.log("WebSocket closed");
-  };
-  ws.onerror = function (error) {
-    console.log("WebSocket error: " + error);
-  };
+  function connectWebSocket() {
+    ws = new WebSocket(`${wsProtocol}//${wsHost}/ws`);
 
-  ws.onmessage = function (event) { // handle this <---------------------------
+    ws.onopen = function () {
+      console.log("WebSocket connected");
+    };
+    ws.onclose = function () {
+      console.log("WebSocket closed");
+      scheduleReconnect();
+    };
+    ws.onerror = function (error) {
+      console.log("WebSocket error: " + error);
+    };
+    ws.onmessage = handleWebSocketMessage;
+  }
+
+  function scheduleReconnect() {
+    if (reconnectTimer !== null) {
+      return
+    }
+
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null
+      connectWebSocket()
+    }, 2000)
+  }
+
+  function handleWebSocketMessage(event) { // handle this <---------------------------
     console.log("WebSocket message: " + event.data);
 
     if (event.data instanceof Blob) {
@@ -212,6 +270,10 @@
       return
     }
 
+    if (typeof event.data !== 'string') {
+      return
+    }
+
     if (event.data.includes("servoX-")) {
       document.getElementById('lr-angle').value = event.data.slice(7)
     }
@@ -222,18 +284,277 @@
       let bool = event.data === "hTouch-true"
       document.getElementById('touch1').checked = bool
     }
+    if (event.data.startsWith("voice:")) {
+      playVoiceLine(decodeURIComponent(event.data.slice(6)))
+    }
 
-  };
+  }
+
+  connectWebSocket()
 
   function sendMessage(message) {
+    if (ws === null || ws.readyState !== WebSocket.OPEN) {
+      console.log("WebSocket not connected, skipped: " + message);
+      return false
+    }
+
     console.log("WebSocket sent: " + message);
     ws.send(message);
+    return true
   }
+
+  const voiceDbName = 'soup-voice-lines'
+  const voiceStoreName = 'lines'
+  const voiceLines = new Map()
+  const decodedVoiceLines = new Map()
+  let audioContext = null
+  let audioUnlocked = false
+
+  function setVoiceStatus(message) {
+    document.getElementById('voice-status').textContent = message
+  }
+
+  function getAudioContext() {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext
+
+    if (!AudioContextClass) {
+      return null
+    }
+    if (audioContext === null) {
+      audioContext = new AudioContextClass()
+    }
+
+    return audioContext
+  }
+
+  async function unlockAudio() {
+    const context = getAudioContext()
+
+    if (context === null) {
+      setVoiceStatus('This browser does not support Web Audio.')
+      return false
+    }
+
+    if (context.state === 'suspended') {
+      await context.resume()
+    }
+
+    if (!audioUnlocked) {
+      const source = context.createBufferSource()
+      source.buffer = context.createBuffer(1, 1, 22050)
+      source.connect(context.destination)
+      source.start(0)
+      audioUnlocked = true
+    }
+
+    return context.state === 'running'
+  }
+
+  function openVoiceDb() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(voiceDbName, 1)
+
+      request.onupgradeneeded = () => {
+        request.result.createObjectStore(voiceStoreName, { keyPath: 'name' })
+      }
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => reject(request.error)
+    })
+  }
+
+  async function runVoiceStore(mode, action) {
+    const db = await openVoiceDb()
+
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(voiceStoreName, mode)
+      const store = tx.objectStore(voiceStoreName)
+      const result = action(store)
+
+      tx.oncomplete = () => {
+        db.close()
+        resolve(result)
+      }
+      tx.onerror = () => {
+        db.close()
+        reject(tx.error)
+      }
+    })
+  }
+
+  async function loadVoiceLines() {
+    const lines = await runVoiceStore('readonly', (store) => {
+      return new Promise((resolve, reject) => {
+        const request = store.getAll()
+
+        request.onsuccess = () => resolve(request.result)
+        request.onerror = () => reject(request.error)
+      })
+    })
+
+    voiceLines.clear()
+    decodedVoiceLines.clear()
+
+    lines
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .forEach((line) => voiceLines.set(line.name, line))
+
+    renderVoiceLines()
+  }
+
+  function renderVoiceLines() {
+    const buttons = document.getElementById('voice-buttons')
+    buttons.replaceChildren()
+
+    if (voiceLines.size === 0) {
+      setVoiceStatus('No voice lines installed on this phone.')
+      return
+    }
+
+    setVoiceStatus(`${voiceLines.size} voice line(s) installed on this phone.`)
+
+    voiceLines.forEach((line) => {
+      const button = document.createElement('button')
+      button.className = 'voice-line'
+      button.textContent = line.name.replace(/\.[^/.]+$/, '')
+      button.onclick = () => triggerVoiceLine(line.name)
+      buttons.appendChild(button)
+    })
+  }
+
+  function pickVoiceLines() {
+    unlockAudio()
+    document.getElementById('voice-files').click()
+  }
+
+  async function importVoiceLines(event) {
+    const files = Array.from(event.target.files)
+
+    if (files.length === 0) {
+      return
+    }
+
+    await unlockAudio()
+    setVoiceStatus(`Importing ${files.length} voice line(s)...`)
+
+    const lines = []
+
+    for (const file of files) {
+      lines.push({
+        name: file.name,
+        type: file.type || 'audio/mpeg',
+        buffer: await file.arrayBuffer()
+      })
+    }
+
+    await runVoiceStore('readwrite', (store) => {
+      for (const line of lines) {
+        store.put(line)
+      }
+    })
+
+    event.target.value = ''
+    await loadVoiceLines()
+  }
+
+  async function clearVoiceLines() {
+    await runVoiceStore('readwrite', (store) => store.clear())
+    voiceLines.clear()
+    decodedVoiceLines.clear()
+    renderVoiceLines()
+  }
+
+  async function getDecodedVoiceLine(name) {
+    if (decodedVoiceLines.has(name)) {
+      return decodedVoiceLines.get(name)
+    }
+
+    const line = voiceLines.get(name)
+    const context = getAudioContext()
+
+    if (!line || context === null) {
+      return null
+    }
+
+    const audioBuffer = await decodeVoiceLine(context, line.buffer.slice(0))
+    decodedVoiceLines.set(name, audioBuffer)
+
+    return audioBuffer
+  }
+
+  function decodeVoiceLine(context, buffer) {
+    return new Promise((resolve, reject) => {
+      const result = context.decodeAudioData(buffer, resolve, reject)
+
+      if (result) {
+        result.then(resolve).catch(reject)
+      }
+    })
+  }
+
+  async function playVoiceLine(name) {
+    if (!voiceLines.has(name)) {
+      setVoiceStatus(`Missing voice line on this phone: ${name}`)
+      return
+    }
+
+    if (!await unlockAudio()) {
+      setVoiceStatus('Audio is blocked. Tap Import Voice Lines once to enable it.')
+      return
+    }
+
+    const context = getAudioContext()
+    let audioBuffer = null
+
+    try {
+      audioBuffer = await getDecodedVoiceLine(name)
+    } catch (error) {
+      console.log('Voice line decode error: ', error)
+      setVoiceStatus(`Could not decode voice line: ${name}`)
+      return
+    }
+
+    if (audioBuffer === null) {
+      setVoiceStatus(`Could not play voice line: ${name}`)
+      return
+    }
+
+    const source = context.createBufferSource()
+    source.buffer = audioBuffer
+    source.connect(context.destination)
+    source.start(0)
+  }
+
+  async function triggerVoiceLine(name) {
+    await unlockAudio()
+    sendMessage(`voice:${encodeURIComponent(name)}`)
+  }
+
+  async function testLocalVoiceLine() {
+    const firstLine = voiceLines.keys().next()
+
+    if (firstLine.done) {
+      setVoiceStatus('No voice lines installed on this phone.')
+      return
+    }
+
+    await playVoiceLine(firstLine.value)
+  }
+
+  document.getElementById('voice-files').addEventListener('change', importVoiceLines)
+  loadVoiceLines().catch((error) => {
+    console.log('Voice line storage error: ', error)
+    setVoiceStatus('Could not load voice lines on this phone.')
+  })
 
   let timerU
   let timerD
   let timerL
   let timerR
+
+  function stopTimer(timer) {
+    clearTimeout(timer)
+    clearInterval(timer)
+  }
 
   document.getElementById("u").addEventListener('touchstart', (e) => {
     e.preventDefault();
@@ -243,8 +564,11 @@
     }, 30)
   })
   document.getElementById("u").addEventListener('touchend', (e) => {
-    clearTimeout(timerU)
-    clearInterval(timerU)
+    stopTimer(timerU)
+    timerU = null
+  })
+  document.getElementById("u").addEventListener('touchcancel', (e) => {
+    stopTimer(timerU)
     timerU = null
   })
 
@@ -256,8 +580,11 @@
     }, 30)
   })
   document.getElementById("d").addEventListener('touchend', (e) => {
-    clearTimeout(timerD)
-    clearInterval(timerD)
+    stopTimer(timerD)
+    timerD = null
+  })
+  document.getElementById("d").addEventListener('touchcancel', (e) => {
+    stopTimer(timerD)
     timerD = null
   })
 
@@ -269,8 +596,11 @@
     }, 30)
   })
   document.getElementById("l").addEventListener('touchend', (e) => {
-    clearTimeout(timerL)
-    clearInterval(timerL)
+    stopTimer(timerL)
+    timerL = null
+  })
+  document.getElementById("l").addEventListener('touchcancel', (e) => {
+    stopTimer(timerL)
     timerL = null
   })
 
@@ -282,8 +612,11 @@
     }, 30)
   })
   document.getElementById("r").addEventListener('touchend', (e) => {
-    clearTimeout(timerR)
-    clearInterval(timerR)
+    stopTimer(timerR)
+    timerR = null
+  })
+  document.getElementById("r").addEventListener('touchcancel', (e) => {
+    stopTimer(timerR)
     timerR = null
   })
 
