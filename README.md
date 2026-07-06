@@ -44,9 +44,9 @@ Libraries In Use
 
 ## Zine page 
 
-Coming soon!
+![Zine Page](./media/zine.png)
 
-The Zine page is also available as a pdf. 
+The Zine page is also available as a pdf [`zine.pdf`](zine.pdf).
 
 ## Build instructions
 
